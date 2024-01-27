@@ -24,6 +24,7 @@ from .realestate import *
 from .spaces_dataset import *
 from .nerf_synthetic import *
 from .scannet import *
+from .gmu_kit import *
 
 dataset_dict = {
     'spaces': SpacesFreeDataset,
@@ -34,5 +35,6 @@ dataset_dict = {
     'llff': LLFFDataset,
     'ibrnet_collected': IBRNetCollectedDataset,
     'llff_test': LLFFTestDataset,
-    'scannet': ScanNetDataset
+    'scannet': ScanNetDataset,
+    'gmukit': GmuKitDataset,
 }
