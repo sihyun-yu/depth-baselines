@@ -19,8 +19,7 @@ import natsort
 from plyfile import PlyData, PlyElement
 from PIL import Image
 from torchvision import transforms as T
-
-import distributed_utils as du
+import pickle
 
 class ScanNetDataset(Dataset):
     """
@@ -31,27 +30,31 @@ class ScanNetDataset(Dataset):
         self.folder_path = os.path.join(args.rootdir, "data/scans")
         self.args = args
         self.mode = mode
-        
-        assert self.args.inv_uniform == False
-        
+                
         self.scene = scene = scenes[0]
         
         self.scene_path = os.path.join(self.folder_path, scene)
-        du.print_if_master(f'scene_path: {self.scene_path}')
+        print(f'scene_path: {self.scene_path}')
         
         colordir = os.path.join(self.scene_path, "exported/color")
         self.image_paths = [f for f in os.listdir(colordir) if os.path.isfile(os.path.join(colordir, f))]
         self.image_paths = [os.path.join(self.scene_path, "exported/color/{}.jpg".format(i)) for i in range(len(self.image_paths))]
-        self.all_id_list = self.filter_valid_id(list(range(len(self.image_paths))))
+        self.all_id_list, self.train_id_list, self.test_id_list = self.filter_valid_id()
         
-        du.print_if_master("all_id_list: ",len(self.all_id_list))
+        print("all_id_list: ",len(self.all_id_list))
         
         # self.intrinsic_matrix = np.loadtxt(os.path.join(self.scene_path, "exported/intrinsic/intrinsic_color.txt")).astype(np.float32)[:3,:3]
         
         # Use depth intrinsic as color image intrinsic
         self.depth_intrinsic = np.loadtxt(
             os.path.join(self.scene_path, "exported/intrinsic/intrinsic_depth.txt")).astype(np.float32)[:3, :3]
-        self.intrinsic_matrix = self.depth_intrinsic
+        intrinsic_matrix = self.depth_intrinsic
+
+        self.intrinsic_matrix = np.eye(4)
+        self.intrinsic_matrix[:3, :3] = intrinsic_matrix
+        
+        print(self.intrinsic_matrix)
+
         
         # image shape is hard-coded following depth size
         self.image_width = 640 
@@ -64,7 +67,7 @@ class ScanNetDataset(Dataset):
         
         cur_id = -1
         if os.path.exists(f'./cache/cache_scannet_{scene}.pkl'):
-            du.print_if_master(f'Start reading cache ./cache/cache_scannet_{scene}.pkl...')
+            print(f'Start reading cache ./cache/cache_scannet_{scene}.pkl...')
             with open(f'./cache/cache_scannet_{scene}.pkl', 'rb') as f:
                 (world_to_camera_matrix_list, camera_to_world_matrix_list, image_filenames, depths,
                  z_vals, near_depth, far_depth, points_xyz) = pkl.load(f)
@@ -75,7 +78,7 @@ class ScanNetDataset(Dataset):
             near_depth = max(np.min(z_vals), 1e-3)
             far_depth = np.max(z_vals)
         
-            du.print_if_master(f'Start processing scannet dataset...')
+            print(f'Start processing scannet dataset...')
             for i in tqdm(range(len(self.all_id_list))):
                 
                 id = self.all_id_list[i]
@@ -92,12 +95,12 @@ class ScanNetDataset(Dataset):
                 c2w = np.loadtxt(os.path.join(self.scene_path, "exported/pose", "{}.txt".format(id))).astype(np.float32)
                 w2c = np.linalg.inv(c2w)
                 
-                camera_to_world_matrix_list.append(c2w[:3, :])
-                world_to_camera_matrix_list.append(w2c[:3, :])
+                camera_to_world_matrix_list.append(c2w)
+                world_to_camera_matrix_list.append(w2c)
 
             depths = np.stack(depths, axis=0)
             
-            if du.is_master_proc():
+            if args.local_rank == 0:
                 with open(f'./cache/cache_scannet_{scene}.pkl', 'wb') as f:
                     pkl.dump([world_to_camera_matrix_list, camera_to_world_matrix_list, image_filenames, depths,
                  z_vals, near_depth, far_depth, points_xyz], f)
@@ -111,7 +114,7 @@ class ScanNetDataset(Dataset):
         
         ''' Set cur z_vals '''
         if os.path.exists(f'./cache/cache_scannet_{scene}_zvals.pkl'):
-            du.print_if_master(f'Start reading cache ./cache/cache_scannet_{scene}_zvals.pkl...')
+            print(f'Start reading cache ./cache/cache_scannet_{scene}_zvals.pkl...')
             with open(f'./cache/cache_scannet_{scene}_zvals.pkl', 'rb') as f:
                 self.near_depth, self.far_depth = pkl.load(f)
         else:
@@ -126,16 +129,16 @@ class ScanNetDataset(Dataset):
             self.near_depth = np.percentile(depth, 5)
             self.far_depth = np.percentile(depth, 95)
         
-            if du.is_master_proc():
+            if args.local_rank == 0:
                 with open(f'./cache/cache_scannet_{scene}_zvals.pkl', 'wb') as f:
                     pkl.dump([self.near_depth, self.far_depth], f)
         
-        du.print_if_master(f'near_depth_before_calib: {near_depth}, far_depth_before_calib: {far_depth}')
-        du.print_if_master("points_z min: ", np.min(z_vals), "max: ", np.max(z_vals))
-        du.print_if_master(f'near_depth_final: {self.near_depth}, far_depth_final: {self.far_depth}')
-        du.print_if_master(f'depth file near_depth: {self.depths.min()}, far_depth: {self.depths.max()}')
-        du.print_if_master(f'total #: {len(image_filenames)}, height: {self.image_height}, width: {self.image_width}')
-        du.print_if_master(self.num_frames, self.depths.shape[0])
+        print(f'near_depth_before_calib: {near_depth}, far_depth_before_calib: {far_depth}')
+        print("points_z min: ", np.min(z_vals), "max: ", np.max(z_vals))
+        print(f'near_depth_final: {self.near_depth}, far_depth_final: {self.far_depth}')
+        print(f'depth file near_depth: {self.depths.min()}, far_depth: {self.depths.max()}')
+        print(f'total #: {len(image_filenames)}, height: {self.image_height}, width: {self.image_width}')
+        print(self.num_frames, self.depths.shape[0])
         
         assert self.num_frames == self.depths.shape[0]
 
@@ -145,16 +148,20 @@ class ScanNetDataset(Dataset):
         self.depth_dict = self.manager.dict()
         
         self.exclude_from_src = []
+    
+    def filter_valid_id(self):
         
-    def filter_valid_id(self, id_list):
-        empty_lst=[]
-        for id in id_list:
-            c2w = np.loadtxt(os.path.join(self.scene_path, "exported/pose", "{}.txt".format(id))).astype(np.float32)
-            if np.max(np.abs(c2w)) < 30:
-                empty_lst.append(id)
-            else:
-                du.print_if_master(f"{id} is filtered")
-        return empty_lst
+        # load
+        with open(os.path.join(self.folder_path, 'scannet_split.pickle'), 'rb') as f:
+            data = pickle.load(f)
+            
+        train_id = data[self.scene]["train"]
+        test_id = data[self.scene]["test"]
+        all_id = sorted(train_id + test_id)
+        print(f"Train: {train_id}")
+        print(f"Test: {test_id}")
+        
+        return all_id, train_id, test_id
     
     def parse_mesh(self):
         points_path = os.path.join(self.scene_path, "exported/pcd.ply")
@@ -212,7 +219,7 @@ class ScanNetDataset(Dataset):
 
     def set_epoch(self, current_epoch):
         self.max_step = min(3, (current_epoch // self.args.init_decay_epoch) + 1)
-        du.print_if_master(f"New max_step: {self.max_step}")
+        print(f"New max_step: {self.max_step}")
 
     def __getitem__(self, idx):
         idx, epoch = idx % len(self), idx // len(self)
@@ -220,7 +227,7 @@ class ScanNetDataset(Dataset):
         
         if idx in self.rgb_dict:
             query_rgb = self.rgb_dict[idx]
-            query_rgb_mask = self.rgb_mask_dict[idx]
+            # query_rgb_mask = self.rgb_mask_dict[idx]
             
         else:
             rgb_array = iio.imread(self.image_filenames[idx]).astype(np.float32) 
@@ -230,10 +237,10 @@ class ScanNetDataset(Dataset):
             query_rgb = resize(rgb_torch, [self.image_height, self.image_width], antialias=True).permute(1, 2, 0).numpy()
             
             rgb_mask_torch = torch.from_numpy(rgb_mask).unsqueeze(0)
-            query_rgb_mask = resize(rgb_mask_torch, [self.image_height, self.image_width], InterpolationMode.NEAREST).squeeze(0).numpy()
+            # query_rgb_mask = resize(rgb_mask_torch, [self.image_height, self.image_width], InterpolationMode.NEAREST).squeeze(0).numpy()
             
             self.rgb_dict[idx] = query_rgb
-            self.rgb_mask_dict[idx] = query_rgb_mask
+            #self.rgb_mask_dict[idx] = query_rgb_mask
         
         query_rgb_path = self.image_filenames[idx]
         query_c2w_matrix = self.camera_to_world_matrix_list[idx]
@@ -241,7 +248,7 @@ class ScanNetDataset(Dataset):
 
         (H, W) = img_size = query_rgb.shape[:2]
         query_camera = np.concatenate(
-            (list(img_size), self.intrinsic_matrix.flatten(), query_c2w_matrix.flatten(), query_w2c_matrix.flatten())
+            (list(img_size), self.intrinsic_matrix.flatten(), query_c2w_matrix.flatten())
         )
         query_depth = self.depths[idx]
         assert query_depth.shape[0] == H and query_depth.shape[1] == W
@@ -274,7 +281,7 @@ class ScanNetDataset(Dataset):
         for src_id in src_ids:
             if (src_id in self.rgb_dict):
                 src_rgb = self.rgb_dict[src_id]
-                src_rgb_mask = self.rgb_mask_dict[src_id]
+                # src_rgb_mask = self.rgb_mask_dict[src_id]
                 
             else:
                 rgb_array = iio.imread(self.image_filenames[src_id]).astype(np.float32) 
@@ -287,18 +294,18 @@ class ScanNetDataset(Dataset):
                 src_rgb_mask = resize(rgb_mask_torch, [self.image_height, self.image_width], InterpolationMode.NEAREST).squeeze(0).numpy()
                 
                 self.rgb_dict[src_id] = src_rgb
-                self.rgb_mask_dict[src_id] = src_rgb_mask
+                # self.rgb_mask_dict[src_id] = src_rgb_mask
                  
             src_rgbs.append(src_rgb)
-            src_rgb_masks.append(src_rgb_mask)
+            #src_rgb_masks.append(src_rgb_mask)
             
             src_c2w_matrix = self.camera_to_world_matrix_list[src_id]
             src_w2c_matrix = self.world_to_camera_matrix_list[src_id]
             
-            src_cameras.append(np.concatenate((list(img_size), self.intrinsic_matrix.flatten(), src_c2w_matrix.flatten(), src_w2c_matrix.flatten())))
+            src_cameras.append(np.concatenate((list(img_size), self.intrinsic_matrix.flatten(), src_c2w_matrix.flatten())))
         
         src_rgbs = np.stack(src_rgbs, axis=0)
-        src_rgb_masks = np.stack(src_rgb_masks, axis=0)
+        #src_rgb_masks = np.stack(src_rgb_masks, axis=0)
         src_cameras = np.stack(src_cameras, axis=0)
         
         depth_range = torch.tensor(
@@ -307,17 +314,19 @@ class ScanNetDataset(Dataset):
         
         ret = {'idx': idx,
                 'data_name': 'scannet',
-                'query_rgb_path': query_rgb_path,
+                'rgb_path': query_rgb_path,
+
                 'query_id': idx,
-               'query_camera': torch.from_numpy(query_camera).float(),
-               'query_rgb': torch.from_numpy(query_rgb).float(),
-               'query_rgb_mask': torch.from_numpy(query_rgb_mask),
-               'query_depth': torch.from_numpy(query_depth).float(),
+               'camera': torch.from_numpy(query_camera).float(),
+               'rgb': torch.from_numpy(query_rgb).float(),
+            #    'query_rgb_mask': torch.from_numpy(query_rgb_mask),
+            #    'query_depth': torch.from_numpy(query_depth).float(),
                'depth_range': depth_range,
-               'src_ids': torch.from_numpy(np.array(src_ids)),
+            #    'src_ids': torch.from_numpy(np.array(src_ids)),
                'src_cameras': torch.from_numpy(src_cameras).float(),
                'src_rgbs': torch.from_numpy(src_rgbs[..., :3]).float(),
-               'src_rgb_masks': torch.from_numpy(src_rgb_masks),
+            #   'src_rgb_masks': torch.from_numpy(src_rgb_masks),
             }
+
 
         return ret

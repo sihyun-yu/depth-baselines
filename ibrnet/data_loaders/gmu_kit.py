@@ -20,7 +20,6 @@ from plyfile import PlyData, PlyElement
 from PIL import Image
 from torchvision import transforms as T
 import scipy.io
-import distributed_utils as du
 
 class GmuKitDataset(Dataset):
     """
@@ -57,7 +56,7 @@ class GmuKitDataset(Dataset):
         self.scene_info = scipy.io.loadmat(os.path.join(self.folder_path, f'gmu-kitchens_info/scene_pose_info/scene_{scene}_reconstruct_info_frame_sort.mat'))["frames"].reshape(-1)
         
         self.scene_path = os.path.join(self.folder_path, f"gmu_scene_00{scene}")
-        du.print_if_master(f'scene_path: {self.scene_path}')
+        print(f'scene_path: {self.scene_path}')
         
         self.image_paths = natsort.natsorted(glob.glob(os.path.join(self.scene_path, "Images/*")))
         self.image_filenames = self.image_paths 
@@ -84,7 +83,7 @@ class GmuKitDataset(Dataset):
         
         cur_id = -1
         if os.path.exists(f'./cache/cache_gmukit_{scene}.pkl'):
-            du.print_if_master(f'Start reading cache ./cache/cache_gmukit_{scene}.pkl...')
+            print(f'Start reading cache ./cache/cache_gmukit_{scene}.pkl...')
             with open(f'./cache/cache_gmukit_{scene}.pkl', 'rb') as f:
                 (world_to_camera_matrix_list, camera_to_world_matrix_list, intrinsic_matrix_all, k1s, k2s, depths) = pkl.load(f)
         
@@ -93,7 +92,7 @@ class GmuKitDataset(Dataset):
             self.near_depth = np.percentile(points_xyz[..., -1], 0.5)
             self.far_depth = np.percentile(points_xyz[..., -1], 99.5)
         
-            du.print_if_master(f'Start processing scannet dataset...')
+            print(f'Start processing scannet dataset...')
             for i in tqdm(range(len(self.image_paths))):
                 
                 depth_path = self.depth_paths[i]
@@ -156,7 +155,7 @@ class GmuKitDataset(Dataset):
         
         ''' Set cur z_vals '''
         if os.path.exists(f'./cache/cache_gmukit_{scene}_zvals.pkl'):
-            du.print_if_master(f'Start reading cache ./cache/cache_gmukit_{scene}_zvals.pkl...')
+            print(f'Start reading cache ./cache/cache_gmukit_{scene}_zvals.pkl...')
             with open(f'./cache/cache_gmukit_{scene}_zvals.pkl', 'rb') as f:
                 self.near_depth, self.far_depth = pkl.load(f)
         else:
@@ -165,11 +164,11 @@ class GmuKitDataset(Dataset):
                 with open(f'./cache/cache_gmukit_{scene}_zvals.pkl', 'wb') as f:
                     pkl.dump([self.near_depth, self.far_depth], f)
         
-        # du.print_if_master(f'near_depth_before_calib: {np.min(points_xyz[..., -1])}, far_depth_before_calib: {np.max(points_xyz[..., -1])}')
-        du.print_if_master(f'near_depth_final: {self.near_depth}, far_depth_final: {self.far_depth}')
-        du.print_if_master(f'depth file near_depth: {self.depths.min()}, far_depth: {self.depths.max()}')
-        du.print_if_master(f'total #: {len(image_filenames)}, height: {self.image_height}, width: {self.image_width}')
-        du.print_if_master(self.num_frames, self.depths.shape[0])
+        # print(f'near_depth_before_calib: {np.min(points_xyz[..., -1])}, far_depth_before_calib: {np.max(points_xyz[..., -1])}')
+        print(f'near_depth_final: {self.near_depth}, far_depth_final: {self.far_depth}')
+        print(f'depth file near_depth: {self.depths.min()}, far_depth: {self.depths.max()}')
+        print(f'total #: {len(image_filenames)}, height: {self.image_height}, width: {self.image_width}')
+        print(self.num_frames, self.depths.shape[0])
         
         print(self.num_frames, self.depths.shape[0])
         assert self.num_frames == self.depths.shape[0]
@@ -258,7 +257,7 @@ class GmuKitDataset(Dataset):
 
     def set_epoch(self, current_epoch):
         self.max_step = min(3, (current_epoch // self.args.init_decay_epoch) + 1)
-        du.print_if_master(f"New max_step: {self.max_step}")
+        print(f"New max_step: {self.max_step}")
 
     def __getitem__(self, idx):
         idx, epoch = idx % len(self), idx // len(self)

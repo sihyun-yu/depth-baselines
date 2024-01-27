@@ -104,5 +104,7 @@ def config_parser():
     ########## evaluation options ##########
     parser.add_argument("--llffhold", type=int, default=8,
                         help='will take every 1/N images as LLFF test set, paper uses 8')
+    parser.add_argument("--seed", type=int, default=0,
+                        help="random seed")
 
     return parser

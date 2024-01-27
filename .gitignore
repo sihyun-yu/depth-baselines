@@ -14,3 +14,7 @@ eval/vis_ray_distribution
 tools/data_verify
 /eval/llff/
 /eval/llff_finetune/
+pretrained/
+data/
+data
+cache/

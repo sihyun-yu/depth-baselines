@@ -34,6 +34,10 @@ import config
 import torch.distributed as dist
 from ibrnet.projection import Projector
 from ibrnet.data_loaders.create_training_dataset import create_training_dataset
+from ibrnet.data_loaders.create_training_dataset import create_eval_dataset
+from ibrnet.data_loaders.create_training_dataset import create_valid_dataset
+from ibrnet.data_loaders.create_training_dataset import MySubsetRandomSampler
+from ibrnet.data_loaders.create_training_dataset import collate_fn
 
 
 def worker_init_fn(worker_id):
@@ -75,6 +79,61 @@ def train(args):
             shutil.copy(args.config, f)
 
     # create training dataset
+    # train_dataset, train_sampler = create_training_dataset(args)
+    # currently only support batch_size=1 (i.e., one set of target and source views) for each GPU node
+    # please use distributed parallel on multiple GPUs to train multiple target views per batch
+    # train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1,
+    #                                            worker_init_fn=lambda _: np.random.seed(),
+    #                                            num_workers=args.workers,
+    #                                            pin_memory=True,
+    #                                            sampler=train_sampler,
+    #                                            shuffle=True if train_sampler is None else False)
+
+
+    # Create IBRNet model
+    model = IBRNetModel(args, load_opt=not args.no_load_opt, load_scheduler=not args.no_load_scheduler)
+    # create projector
+    projector = Projector(device=device)
+    global_step = model.start_step + 1
+
+    # TODO(sihyun): Need to double-check here if it is correctly applied or nort
+    train_dataset = create_training_dataset(args)
+    eval_dataset = create_eval_dataset(args)    
+
+    left, right =  0, 200
+    num_source_views = args.num_source_views
+
+    eval_image_ids = eval_dataset.test_id_list
+    train_image_ids = [x for x in range(
+        left+num_source_views, right-num_source_views) if x not in eval_image_ids]
+
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+    # train_sampler = MySubsetRandomSampler(
+    #     train_image_ids,
+    #     mult=50000000,
+    #     compensate=0,
+    #     num_data=len(train_dataset),
+    #     generator=generator
+    # )
+
+    # train_loader = torch.utils.data.DataLoader(
+    #     train_dataset,
+    #     batch_size=1,
+    #     num_workers=args.workers,
+    #     pin_memory=True,
+    #     sampler=train_sampler,
+    #     shuffle=False,
+    #     collate_fn=collate_fn(N_rand=int(1.0 * args.N_rand),
+    #                           sample_mode=args.sample_mode,
+    #                           N_samples=args.N_samples, 
+    #                           inv_uniform=args.inv_uniform, 
+    #                           det=args.det,
+    #                           seed=args.local_rank+global_step
+    #                           )
+    # )
+
+    # create training dataset
     train_dataset, train_sampler = create_training_dataset(args)
     # currently only support batch_size=1 (i.e., one set of target and source views) for each GPU node
     # please use distributed parallel on multiple GPUs to train multiple target views per batch
@@ -85,17 +144,14 @@ def train(args):
                                                sampler=train_sampler,
                                                shuffle=True if train_sampler is None else False)
 
-    # create validation dataset
-    val_dataset = dataset_dict[args.eval_dataset](args, 'validation',
-                                                  scenes=args.eval_scenes)
 
+    # create validation dataset
+    # val_dataset = dataset_dict[args.eval_dataset](args, 'validation',
+    #                                               scenes=args.eval_scenes)
+    # TODO(sihyun): Need to double-check if it is correctly applied
+    val_dataset = create_valid_dataset(args)
     val_loader = DataLoader(val_dataset, batch_size=1)
     val_loader_iterator = iter(cycle(val_loader))
-
-    # Create IBRNet model
-    model = IBRNetModel(args, load_opt=not args.no_load_opt, load_scheduler=not args.no_load_scheduler)
-    # create projector
-    projector = Projector(device=device)
 
     # Create criterion
     criterion = Criterion()
@@ -105,7 +161,6 @@ def train(args):
         print('saving tensorboard files to {}'.format(tb_dir))
     scalars_to_log = {}
 
-    global_step = model.start_step + 1
     epoch = 0
     while global_step < model.start_step + args.n_iters + 1:
         np.random.seed()

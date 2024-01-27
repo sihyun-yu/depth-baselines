@@ -20,9 +20,186 @@ import torch
 from scipy.spatial.transform import Rotation as R
 import cv2
 
+import math
+from typing import Optional
+
 rng = np.random.RandomState(234)
 _EPS = np.finfo(float).eps * 4.0
 TINY_NUMBER = 1e-6      # float32 only has 7 decimal digits precision
+
+def create_meshgrid(
+    height: int,
+    width: int,
+    normalized_coordinates: bool = True,
+    device: Optional[torch.device] = torch.device('cpu'),
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+
+    xs = torch.arange(0, width, device=device, dtype=dtype) + 0.5
+    ys = torch.arange(0, height, device=device, dtype=dtype) + 0.5
+    
+    if normalized_coordinates:
+        xs = (xs * (2.0 / width)) - 1.0
+        ys = (ys * (2.0 / height)) - 1.0
+
+    return torch.stack(torch.meshgrid([xs, ys], indexing="xy"), dim=-1)  # HxWx2
+
+def sample_random_pixel(N_rand, sample_mode, H, W, rng, center_ratio=0.8):
+    """Sample pixel randomly from the target view."""
+    if sample_mode == 'center':
+        border_H = int(H * (1 - center_ratio) / 2.0)
+        border_W = int(W * (1 - center_ratio) / 2.0)
+
+        # pixel coordinates
+        u, v = np.meshgrid(
+            np.arange(border_H, H - border_H),
+            np.arange(border_W, W - border_W),
+        )
+        u = u.reshape(-1)
+        v = v.reshape(-1)
+
+        select_inds = rng.choice(u.shape[0], size=(N_rand,), replace=False)
+        select_inds = v[select_inds] + W * u[select_inds]
+
+    elif sample_mode == 'uniform':
+        # Random from one image
+        select_inds = rng.choice(H*W, size=(N_rand,), replace=False)
+    else:
+        raise NotImplementedError()
+
+    return select_inds
+
+def sample_along_camera_ray(ray_o, ray_d, depth_range, N_samples, inv_uniform, det):
+    """Create samples along a ray.
+
+    Args:
+        ray_o: ray origin
+        ray_d: ray direction
+        depth_range: depth bounds
+        N_samples: number of samples
+        inv_uniform: whether the sample according to inverse depth
+        det: deterministic sample or not
+
+    Returns:
+        pts: 3D sample point location
+        z_vals: depth value of samples
+        s_vals: normalized depth value of samples
+    """    
+    # will sample inside [near_depth, far_depth]
+    # assume the nearest possible depth is at least (min_ratio * depth)
+    near_depth_value = depth_range[:, 0]
+    far_depth_value = depth_range[:, 1]
+    
+    assert (
+            near_depth_value > 0
+            and far_depth_value > 0
+            and far_depth_value > near_depth_value
+    )
+
+    # near_depth = near_depth_value * torch.ones_like(ray_d[..., 0])
+    # far_depth = far_depth_value * torch.ones_like(ray_d[..., 0])
+    N_rays = len(ray_d)
+    if inv_uniform:
+        start = 1.0 / near_depth_value
+        step = (1.0 / far_depth_value - start) / (N_samples - 1)
+        inv_z_vals = torch.stack(
+                [start + i * step for i in range(N_samples)], dim=1
+        )  # [1, N_samples]
+        z_vals = 1.0 / inv_z_vals
+      
+        # start = 1.0 / near_depth  # [N_rays,]
+        # step = (1.0 / far_depth - start) / (N_samples - 1)
+        # inv_z_vals = torch.stack(
+        #         [start + i * step for i in range(N_samples)], dim=1
+        # )  # [N_rays, N_samples]
+        # z_vals = 1.0 / inv_z_vals
+    else:
+        start = near_depth_value
+        step = (far_depth_value - near_depth_value) / (N_samples - 1)
+        z_vals = torch.stack(
+                [start + i * step for i in range(N_samples)], dim=1
+        )  # [1, N_samples]
+      
+        # start = near_depth
+        # step = (far_depth - near_depth) / (N_samples - 1)
+        # z_vals = torch.stack(
+        #         [start + i * step for i in range(N_samples)], dim=1
+        # )  # [N_rays, N_samples]
+    # true_z_vals = z_vals.clone()
+    
+    if det:
+        z_vals = z_vals.repeat(N_rays, 1)
+    else:
+        # get intervals between samples
+        mids = 0.5 * (z_vals[:, 1:] + z_vals[:, :-1])
+        upper = torch.cat([mids, z_vals[:, -1:]], dim=-1)
+        lower = torch.cat([z_vals[:, 0:1], mids], dim=-1)
+        # uniformly random samples in those intervals
+        t_rand = torch.rand_like(z_vals.expand(N_rays, -1))
+        z_vals = lower + (upper - lower) * t_rand  # [N_rays, N_samples]
+        
+    pts = z_vals.unsqueeze(2) * ray_d.unsqueeze(1) + ray_o.unsqueeze(1)  # [N_rays, N_samples, 3]
+    # from mip-nerf 360 normalized distance
+    s_vals = ((1.0 / z_vals) - (1.0 / near_depth_value)) / (
+            1.0 / far_depth_value - 1.0 / near_depth_value
+    )
+
+    return pts, z_vals, s_vals
+
+
+def get_interval_pose_ids(
+    tar_pose,
+    ref_poses,
+    tar_id=-1,
+    angular_dist_method='dist',
+    interval=2,
+    scene_center=(0, 0, 0),
+    min_dist = 0,
+    max_dist = 0,
+    ):
+  """Get poses id in nearest neighboorhood manner from every 'interval' frames."""
+
+  original_indices = np.array(range(0, len(ref_poses)))
+
+  ref_poses = ref_poses[::interval]
+  subsample_indices = original_indices[::interval]
+
+  num_cams = len(ref_poses)
+  batched_tar_pose = tar_pose[None, ...].repeat(num_cams, 0)
+
+  if angular_dist_method == 'matrix':
+    dists = batched_angular_dist_rot_matrix(batched_tar_pose[:, :3, :3], 
+                                            ref_poses[:, :3, :3])
+  elif angular_dist_method == 'vector':
+    tar_cam_locs = batched_tar_pose[:, :3, 3]
+    ref_cam_locs = ref_poses[:, :3, 3]
+    scene_center = np.array(scene_center)[None, ...]
+    tar_vectors = tar_cam_locs - scene_center
+    ref_vectors = ref_cam_locs - scene_center
+    dists = angular_dist_between_2_vectors(tar_vectors, ref_vectors)
+  elif angular_dist_method == 'dist':
+    tar_cam_locs = batched_tar_pose[:, :3, 3]
+    ref_cam_locs = ref_poses[:, :3, 3]
+    dists = np.linalg.norm(tar_cam_locs - ref_cam_locs, axis=1)
+  else:
+    raise NotImplementedError
+
+  # if tar_id >= 0:
+  #   assert tar_id < num_cams
+  #   dists[tar_id] = 1e3
+
+  sorted_ids = np.argsort(dists)    
+  final_ids = subsample_indices[sorted_ids]
+  
+  if min_dist != 0:
+    assert tar_id != -1
+    final_ids = [idx for idx in final_ids if abs(tar_id - idx) > min_dist]
+    
+  if max_dist != 0:
+    assert tar_id != -1
+    final_ids = [idx for idx in final_ids if abs(tar_id - idx) < max_dist]
+    
+  return final_ids
 
 
 def vector_norm(data, axis=None, out=None):
